@@ -155,6 +155,8 @@ export interface LLMPreset {
   endpoint: 'chat_completions' | 'responses'
   messages: LLMMessage[]
   output_format: 'json' | 'text'
+  /** 打标时是否把同名 .txt/.json 已有 caption 作为先验注入 prompt（默认 false）。 */
+  inject_existing_tags: boolean
   temperature: number
   max_tokens: number
   max_side: number
@@ -200,7 +202,11 @@ export interface CLTaggerConfig {
   local_dir: string | null
   threshold_general: number
   threshold_character: number
+  /** 输出 category 白名单。CLTagger 8 类: General/Character/Copyright/Artist/Meta/Model/Rating/Quality。 */
+  categories: string[]
+  /** @deprecated 由 schema validator 迁移合并进 categories，新代码读 categories 即可。 */
   add_rating_tag: boolean
+  /** @deprecated 由 schema validator 迁移合并进 categories，新代码读 categories 即可。 */
   add_model_tag: boolean
   blacklist_tags: string[]
   batch_size: number
@@ -647,6 +653,22 @@ export interface CurationView {
   download_total: number
   train_total: number
   folders: string[]
+}
+
+export interface ConvertPngResult {
+  converted: string[]
+  failed: { name: string; reason: string }[]
+  skipped_png: string[]
+  skipped_exists: string[]
+  missing: string[]
+}
+
+export interface ResizeOversizedResult {
+  max_long_edge: number
+  resized: { name: string; before: [number, number]; after: [number, number] }[]
+  skipped: string[]
+  failed: { name: string; reason: string }[]
+  missing: string[]
 }
 
 export interface CopyResult {
@@ -1415,6 +1437,8 @@ export const api = {
     body: {
       tagger: TaggerName
       output_format?: 'txt' | 'json'
+      /** true = 跳过已有同名 .txt/.json 的图，避免重复消耗（LLM 配额 / 本地推理时间） */
+      skip_existing?: boolean
       /**
        * wd14 本次任务的临时覆盖；仅在 worker 进程生效，不写回 settings。
        * 字段为 undefined / null 时沿用全局 settings。
@@ -1433,6 +1457,7 @@ export const api = {
         model_path?: string | null
         tag_mapping_path?: string | null
         local_dir?: string | null
+        categories?: string[] | null
         add_rating_tag?: boolean | null
         add_model_tag?: boolean | null
         blacklist_tags?: string[] | null
@@ -1619,6 +1644,24 @@ export const api = {
   ) =>
     req<{ removed: string[]; missing: string[] }>(
       `/api/projects/${pid}/versions/${vid}/curation/remove`,
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
+  convertToPng: (
+    pid: number,
+    vid: number,
+    body: { folder: string; files: string[] }
+  ) =>
+    req<ConvertPngResult>(
+      `/api/projects/${pid}/versions/${vid}/curation/convert-png`,
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
+  resizeOversized: (
+    pid: number,
+    vid: number,
+    body: { folder: string; files: string[]; max_long_edge?: number }
+  ) =>
+    req<ResizeOversizedResult>(
+      `/api/projects/${pid}/versions/${vid}/curation/resize-oversized`,
       { method: 'POST', body: JSON.stringify(body) }
     ),
   folderOp: (

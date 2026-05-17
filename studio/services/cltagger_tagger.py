@@ -204,6 +204,9 @@ class CLTagger(OnnxTaggerBase):
         scores = self._sigmoid(logits)
         out: list[tuple[str, float]] = []
         blacklist = set(cfg.blacklist_tags)
+        # categories 是单一过滤来源（schema validator 已把旧 add_rating_tag /
+        # add_model_tag 合并进来）。默认仅 General + Character。
+        keep_cats = set(cfg.categories)
         for i, p in enumerate(scores):
             if i >= len(self._labels.names):
                 break
@@ -211,9 +214,7 @@ class CLTagger(OnnxTaggerBase):
             if not tag or tag in blacklist:
                 continue
             cat = self._labels.categories[i]
-            if cat == "Rating" and not cfg.add_rating_tag:
-                continue
-            if cat == "Model" and not cfg.add_model_tag:
+            if cat not in keep_cats:
                 continue
             thr = cfg.threshold_character if cat == "Character" else cfg.threshold_general
             p_f = float(p)

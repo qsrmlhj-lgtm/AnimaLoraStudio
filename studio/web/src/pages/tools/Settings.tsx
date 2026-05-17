@@ -127,6 +127,7 @@ function _makeFallbackPreset(id: string, label: string, output_format: 'json' | 
       { type: 'image', role: 'user', content: '' },
     ],
     output_format,
+    inject_existing_tags: false,
     temperature: 0.2,
     max_tokens: 700,
     max_side: 1280,
@@ -213,6 +214,7 @@ const EMPTY: Secrets = {
     local_dir: null,
     threshold_general: 0.35,
     threshold_character: 0.6,
+    categories: ['General', 'Character'],
     add_rating_tag: false,
     add_model_tag: false,
     blacklist_tags: [],
@@ -735,14 +737,31 @@ export default function SettingsPage() {
               className={`${textInputClass} max-w-32`}                                      />
           </SettingsField>
         </div>
-        <div className="grid grid-cols-2 gap-3">
-          <SettingsField label="add_rating_tag">
-            <Bool value={draft.cltagger.add_rating_tag} onChange={(v) => update('cltagger', 'add_rating_tag', v)} />
-          </SettingsField>
-          <SettingsField label="add_model_tag">
-            <Bool value={draft.cltagger.add_model_tag} onChange={(v) => update('cltagger', 'add_model_tag', v)} />
-          </SettingsField>
-        </div>
+        <SettingsField
+          label="categories"
+          desc="输出 category 白名单。模型有 8 类，默认仅 通用+角色（关掉 质量/Meta/Rating 等噪声 tag）"
+        >
+          <div className="flex flex-wrap gap-2">
+            {(['General','Character','Copyright','Artist','Meta','Model','Rating','Quality'] as const).map((k) => {
+              const checked = (draft.cltagger.categories ?? []).includes(k)
+              return (
+                <label key={k} className="flex items-center gap-1 text-xs text-fg-secondary cursor-pointer px-2 py-0.5 rounded bg-sunken border border-subtle">
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(e) => {
+                      const next = new Set(draft.cltagger.categories ?? [])
+                      if (e.target.checked) next.add(k)
+                      else next.delete(k)
+                      update('cltagger', 'categories', Array.from(next))
+                    }}
+                  />
+                  {k}
+                </label>
+              )
+            })}
+          </div>
+        </SettingsField>
         <SettingsField label="blacklist_tags" desc="逗号分隔">
           <input
             type="text"

@@ -415,6 +415,60 @@ export default function CurationPage() {
     })
   }
 
+  const doResizeOversized = async () => {
+    if (!rightFolder) return toast('请先选一个文件夹', 'error')
+    const files = rightSel.size > 0 ? Array.from(rightSel) : rightSortedNames
+    if (files.length === 0) return
+    setBusy(true)
+    try {
+      const r = await api.resizeOversized(project.id, activeVersion.id, {
+        folder: rightFolder,
+        files,
+        max_long_edge: 1920,
+      })
+      const parts: string[] = []
+      if (r.resized.length) parts.push(`缩放 ${r.resized.length}`)
+      if (r.skipped.length) parts.push(`已在阈值内 ${r.skipped.length}`)
+      if (r.failed.length) parts.push(`失败 ${r.failed.length}`)
+      toast(parts.join(' · ') || '无变更', r.failed.length ? 'error' : 'success')
+      setRightSel(new Set())
+      await refresh()
+      await reload()
+    } catch (e) {
+      toast(String(e), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const doConvertPng = async () => {
+    if (!rightFolder) return toast('请先选一个文件夹', 'error')
+    const files = rightSel.size > 0 ? Array.from(rightSel) : rightSortedNames
+    if (files.length === 0) return
+    const nonPng = files.filter((n) => !n.toLowerCase().endsWith('.png'))
+    if (nonPng.length === 0) return toast('所有图片已经是 PNG 格式', 'success')
+    setBusy(true)
+    try {
+      const r = await api.convertToPng(project.id, activeVersion.id, {
+        folder: rightFolder,
+        files,
+      })
+      const parts: string[] = []
+      if (r.converted.length) parts.push(`转换 ${r.converted.length}`)
+      if (r.skipped_png.length) parts.push(`已是 PNG ${r.skipped_png.length}`)
+      if (r.skipped_exists.length) parts.push(`同名跳过 ${r.skipped_exists.length}`)
+      if (r.failed.length) parts.push(`失败 ${r.failed.length}`)
+      toast(parts.join(' · ') || '无变更', r.failed.length ? 'error' : 'success')
+      setRightSel(new Set())
+      await refresh()
+      await reload()
+    } catch (e) {
+      toast(String(e), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const doCreateFolder = async () => {
     const name = newFolder.trim()
     if (!name) return
@@ -672,6 +726,28 @@ export default function CurationPage() {
                 disabled={busy || rightSel.size === 0}
               >
                 清空
+              </BtnSecondary>
+              <BtnSecondary
+                onClick={doConvertPng}
+                disabled={busy || !rightFolder}
+                title={
+                  rightSel.size > 0
+                    ? `将选中的 ${rightSel.size} 张非 PNG 图转为 PNG`
+                    : `将 ${rightFolder || '?'} 中所有非 PNG 图转为 PNG`
+                }
+              >
+                → PNG{rightSel.size > 0 ? ` (${rightSel.size})` : ' (全部)'}
+              </BtnSecondary>
+              <BtnSecondary
+                onClick={doResizeOversized}
+                disabled={busy || !rightFolder}
+                title={
+                  rightSel.size > 0
+                    ? `将选中的 ${rightSel.size} 张图中长边 > 1920px 的等比缩到 1920px（避免训练时 pos_embedder 越界）`
+                    : `将 ${rightFolder || '?'} 中所有长边 > 1920px 的图等比缩到 1920px（避免训练时 pos_embedder 越界）`
+                }
+              >
+                ↘ ≤1920{rightSel.size > 0 ? ` (${rightSel.size})` : ' (全部)'}
               </BtnSecondary>
               <BtnDanger
                 onClick={doRemove}

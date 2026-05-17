@@ -1486,6 +1486,18 @@ class RemoveRequest(BaseModel):
     files: list[str]
 
 
+class ConvertPngRequest(BaseModel):
+    folder: str
+    files: list[str]
+
+
+class ResizeOversizedRequest(BaseModel):
+    folder: str
+    files: list[str]
+    # 默认 1920 = pos_embedder max_h(120) × VAE/patch 总下采样(16)
+    max_long_edge: int = 1920
+
+
 class FolderOp(BaseModel):
     op: str  # "create" | "rename" | "delete"
     name: str
@@ -1552,6 +1564,32 @@ def remove_from_train(
     return result
 
 
+@app.post("/api/projects/{pid}/versions/{vid}/curation/convert-png")
+def convert_to_png(
+    pid: int, vid: int, body: ConvertPngRequest
+) -> dict[str, Any]:
+    with db.connection_for() as conn:
+        try:
+            return curation.convert_train_to_png(
+                conn, pid, vid, body.folder, body.files
+            )
+        except curation.CurationError as exc:
+            raise HTTPException(_curation_err_code(exc), str(exc)) from exc
+
+
+@app.post("/api/projects/{pid}/versions/{vid}/curation/resize-oversized")
+def resize_oversized(
+    pid: int, vid: int, body: ResizeOversizedRequest
+) -> dict[str, Any]:
+    with db.connection_for() as conn:
+        try:
+            return curation.resize_oversized_in_train(
+                conn, pid, vid, body.folder, body.files, body.max_long_edge
+            )
+        except curation.CurationError as exc:
+            raise HTTPException(_curation_err_code(exc), str(exc)) from exc
+
+
 @app.post("/api/projects/{pid}/versions/{vid}/curation/folder")
 def folder_op(
     pid: int, vid: int, body: FolderOp
@@ -1602,6 +1640,7 @@ class CLTaggerOverrides(BaseModel):
     local_dir: Optional[str] = None
     add_rating_tag: Optional[bool] = None
     add_model_tag: Optional[bool] = None
+    categories: Optional[list[str]] = None
     blacklist_tags: Optional[list[str]] = None
 
 
@@ -1618,6 +1657,7 @@ class LLMTaggerOverrides(BaseModel):
     endpoint: Optional[str] = None
     prompt: Optional[str] = None
     output_format: Optional[str] = None
+    inject_existing_tags: Optional[bool] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     timeout: Optional[int] = None
@@ -1630,6 +1670,8 @@ class LLMTaggerOverrides(BaseModel):
 class TagJobRequest(BaseModel):
     tagger: str = "wd14"
     output_format: str = "txt"                # "txt" | "json"
+    # 已有同名 .txt / .json caption 时跳过该图，避免重复消耗（LLM 配额 / 本地推理时间）
+    skip_existing: bool = False
     wd14_overrides: Optional[Wd14Overrides] = None
     cltagger_overrides: Optional[CLTaggerOverrides] = None
     llm_overrides: Optional[LLMTaggerOverrides] = None
@@ -1947,12 +1989,18 @@ def start_tag(pid: int, vid: int, body: TagJobRequest) -> dict[str, Any]:
         raise HTTPException(400, f"unknown tagger: {body.tagger}")
     if body.output_format not in {"txt", "json"}:
         raise HTTPException(400, "output_format must be txt|json")
+    # tagger ↔ format 互斥约束：ONNX 本地打标 → txt；LLM 打标 → json
+    if body.tagger in {"wd14", "cltagger"} and body.output_format != "txt":
+        raise HTTPException(400, f"{body.tagger} 仅支持 output_format=txt")
+    if body.tagger == "llm" and body.output_format != "json":
+        raise HTTPException(400, "llm 仅支持 output_format=json")
     _, v, _ = _version_train_dir_or_404(pid, vid)
 
     params: dict[str, Any] = {
         "tagger": body.tagger,
         "version_id": vid,
         "output_format": body.output_format,
+        "skip_existing": bool(body.skip_existing),
     }
     # 通用：按 tagger 名取 `<name>_overrides` 字段并落到 params 同名键。
     # 仅保留用户实际填写的字段；空 dict 也不写。

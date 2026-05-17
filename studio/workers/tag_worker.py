@@ -59,6 +59,32 @@ def _collect_images(train_dir: Path) -> list[Path]:
     return out
 
 
+def _has_caption(image_path: Path, fmt: str = "") -> bool:
+    """图片同名 caption 文件存在且非空 → 视为已打标。
+
+    fmt 决定查哪个后缀（与 tagger 输出 format 对齐）：
+    - "json" → 只查 .json（LLM 任务）
+    - "txt"  → 只查 .txt（wd14 / cltagger 任务）
+    - 其它   → 两个都查（向后兼容）
+
+    空文件 / 0 字节算"未打标"（避免上一次 worker 半途崩溃留下空 caption 导致永久跳过）。
+    """
+    if fmt == "json":
+        suffixes = (".json",)
+    elif fmt == "txt":
+        suffixes = (".txt",)
+    else:
+        suffixes = (".txt", ".json")
+    for suffix in suffixes:
+        sibling = image_path.with_suffix(suffix)
+        try:
+            if sibling.exists() and sibling.stat().st_size > 0:
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def run(job_id: int) -> int:
     with db.connection_for() as conn:
         job = project_jobs.get_job(conn, job_id)
@@ -95,9 +121,33 @@ def run(job_id: int) -> int:
             progress("[done] 没有图可打标（train/ 是空的）")
             return 0
 
+        # skip_existing: 同名 .txt 或 .json 存在且非空时跳过，避免重复消耗
+        # （LLM API 配额 / 本地推理时间）。caption 文件视为已打标证据。
+        skip_existing = bool(params.get("skip_existing", False))
+        total_images = len(images)
+        skipped_existing = 0
+        if skip_existing:
+            kept: list[Path] = []
+            for img in images:
+                # 按 tagger 输出 format 判定：LLM 只看 .json，wd14/cltagger 只看 .txt。
+                # 让 "先 wd14 打 .txt → 再 LLM 补 .json" 流程能正确识别"需要 LLM 处理的图"。
+                if _has_caption(img, fmt=fmt):
+                    skipped_existing += 1
+                else:
+                    kept.append(img)
+            images = kept
+            if skipped_existing:
+                progress(
+                    f"[skip] 已有 caption 跳过 {skipped_existing}/{total_images} 张"
+                )
+            if not images:
+                progress("[done] 所有图都已有 caption（skip_existing=true）")
+                return 0
+
         progress(
             f"[start] tagger={tagger_name} version={v['label']} "
             f"images={len(images)} format={fmt}"
+            + (f" skip_existing={skipped_existing}" if skip_existing else "")
         )
 
         tagger = get_tagger(tagger_name, overrides=overrides)

@@ -44,10 +44,22 @@ type CLTaggerForm = {
   model_path: string
   tag_mapping_path: string
   local_dir: string
-  add_rating_tag: boolean
-  add_model_tag: boolean
+  /** category 白名单；默认 ['General','Character'] = 通用+角色。 */
+  categories: string[]
   blacklist_tags: string[]
 }
+
+/** CLTagger tag_mapping 里出现的全部 category（按训练集频次降序）。 */
+const CLTAGGER_CATEGORIES: ReadonlyArray<{ key: string; label: string }> = [
+  { key: 'General', label: '通用' },
+  { key: 'Character', label: '角色' },
+  { key: 'Copyright', label: '作品' },
+  { key: 'Artist', label: '画师' },
+  { key: 'Meta', label: 'Meta' },
+  { key: 'Model', label: 'Model' },
+  { key: 'Rating', label: '分级' },
+  { key: 'Quality', label: '质量' },
+]
 
 type LLMTaggerForm = {
   /** 切换 active preset id；切换会重置其他字段为该 preset 默认值。 */
@@ -57,6 +69,7 @@ type LLMTaggerForm = {
   endpoint: LLMPreset['endpoint']
   messages: LLMMessage[]
   output_format: LLMPreset['output_format']
+  inject_existing_tags: boolean
   temperature: number
   max_tokens: number
   timeout: number
@@ -84,8 +97,9 @@ function fromCLTaggerConfig(cfg: CLTaggerConfig): CLTaggerForm {
     model_path: cfg.model_path,
     tag_mapping_path: cfg.tag_mapping_path,
     local_dir: cfg.local_dir ?? '',
-    add_rating_tag: cfg.add_rating_tag,
-    add_model_tag: cfg.add_model_tag,
+    categories: Array.isArray(cfg.categories) && cfg.categories.length > 0
+      ? [...cfg.categories]
+      : ['General', 'Character'],
     blacklist_tags: cfg.blacklist_tags,
   }
 }
@@ -102,6 +116,7 @@ function fromLLMPreset(p: LLMPreset): LLMTaggerForm {
     endpoint: p.endpoint,
     messages: p.messages.map((m) => ({ ...m })),
     output_format: p.output_format,
+    inject_existing_tags: p.inject_existing_tags ?? false,
     temperature: p.temperature,
     max_tokens: p.max_tokens,
     timeout: p.timeout,
@@ -118,7 +133,11 @@ export default function TaggingPage() {
 
   const [tagger, setTagger] = useState<TaggerName>('wd14')
   const [taggerStatus, setTaggerStatus] = useState<TaggerStatus | null>(null)
-  const [outputFormat, setOutputFormat] = useState<'txt' | 'json'>('txt')
+  // ONNX 本地打标只允许 txt；LLM 打标只允许 json — 由 tagger 切换强锁。
+  const forcedFormat: 'txt' | 'json' = tagger === 'llm' ? 'json' : 'txt'
+  const outputFormat = forcedFormat
+  // 默认 false 保持向后兼容；勾上后 worker 会跳过同名 .txt/.json 已存在的图。
+  const [skipExisting, setSkipExisting] = useState<boolean>(false)
 
   const [wd14Defaults, setWd14Defaults] = useState<WD14Config | null>(null)
   const [wd14Form, setWd14Form] = useState<Wd14Form | null>(null)
@@ -235,10 +254,14 @@ export default function TaggingPage() {
     const localDirChanged =
       (cltaggerForm.local_dir || null) !== (cltaggerDefaults.local_dir ?? null)
     if (localDirChanged) out.local_dir = cltaggerForm.local_dir || null
-    if (cltaggerForm.add_rating_tag !== cltaggerDefaults.add_rating_tag)
-      out.add_rating_tag = cltaggerForm.add_rating_tag
-    if (cltaggerForm.add_model_tag !== cltaggerDefaults.add_model_tag)
-      out.add_model_tag = cltaggerForm.add_model_tag
+    const defaultCats = (cltaggerDefaults.categories && cltaggerDefaults.categories.length > 0)
+      ? cltaggerDefaults.categories
+      : ['General', 'Character']
+    if (
+      JSON.stringify([...cltaggerForm.categories].sort()) !==
+      JSON.stringify([...defaultCats].sort())
+    )
+      out.categories = cltaggerForm.categories
     if (
       JSON.stringify(cltaggerForm.blacklist_tags) !==
       JSON.stringify(cltaggerDefaults.blacklist_tags)
@@ -260,6 +283,7 @@ export default function TaggingPage() {
     // 其他字段：对比 active preset 的值，不同才进 overrides
     const fields: ReadonlyArray<Exclude<keyof LLMTaggerForm, 'preset_id'>> = [
       'base_url', 'model', 'endpoint', 'messages', 'output_format',
+      'inject_existing_tags',
       'temperature', 'max_tokens', 'timeout', 'max_retries',
       'max_side', 'jpeg_quality', 'max_image_mb',
     ]
@@ -284,6 +308,7 @@ export default function TaggingPage() {
       const j = await api.startTag(project.id, activeVersion.id, {
         tagger,
         output_format: outputFormat,
+        skip_existing: skipExisting,
         wd14_overrides,
         cltagger_overrides,
         llm_overrides,
@@ -363,15 +388,30 @@ export default function TaggingPage() {
 
             <span className="text-dim">|</span>
             <span className="text-fg-tertiary">format</span>
-            <select
-              value={outputFormat}
-              onChange={(e) => setOutputFormat(e.target.value as 'txt' | 'json')}
-              className="input text-sm"
-              style={{ padding: '3px 8px' }}
+            <span
+              className="badge badge-neutral font-mono"
+              title={
+                tagger === 'llm'
+                  ? 'LLM 打标固定输出 .json（含结构化字段）'
+                  : '本地 ONNX 打标固定输出 .txt（逗号分隔 tag 列表）'
+              }
             >
-              <option value="txt">.txt</option>
-              <option value="json">.json</option>
-            </select>
+              .{outputFormat}（自动）
+            </span>
+
+            <span className="text-dim">|</span>
+            <label
+              className="flex items-center gap-1.5 cursor-pointer"
+              title="勾上：已有同名 .txt 或 .json 的图跳过，不再调用 tagger（省 LLM 配额 / 推理时间）"
+            >
+              <input
+                type="checkbox"
+                checked={skipExisting}
+                onChange={(e) => setSkipExisting(e.target.checked)}
+              />
+              <span className="text-fg-tertiary">跳过已有 caption</span>
+              {skipExisting && <span className="badge badge-warn text-[10px]">已开</span>}
+            </label>
 
             <span className="flex-1" />
           </section>
@@ -597,6 +637,9 @@ function CLTaggerPanel({
     )
   }
 
+  const defaultCats = (defaults.categories && defaults.categories.length > 0)
+    ? defaults.categories
+    : ['General', 'Character']
   const dirty =
     form.threshold_general !== defaults.threshold_general ||
     form.threshold_character !== defaults.threshold_character ||
@@ -604,10 +647,17 @@ function CLTaggerPanel({
     form.model_path !== defaults.model_path ||
     form.tag_mapping_path !== defaults.tag_mapping_path ||
     (form.local_dir || null) !== (defaults.local_dir ?? null) ||
-    form.add_rating_tag !== defaults.add_rating_tag ||
-    form.add_model_tag !== defaults.add_model_tag ||
+    JSON.stringify([...form.categories].sort()) !==
+      JSON.stringify([...defaultCats].sort()) ||
     JSON.stringify(form.blacklist_tags) !==
       JSON.stringify(defaults.blacklist_tags)
+
+  const toggleCategory = (key: string, checked: boolean) => {
+    const set = new Set(form.categories)
+    if (checked) set.add(key)
+    else set.delete(key)
+    onChange({ ...form, categories: Array.from(set) })
+  }
 
   const restore = () => onChange(fromCLTaggerConfig(defaults))
 
@@ -654,24 +704,6 @@ function CLTaggerPanel({
           disabled={disabled}
           onChange={(v) => onChange({ ...form, threshold_character: v })}
         />
-        <label className="flex items-center gap-1.5 text-xs text-fg-tertiary">
-          <input
-            type="checkbox"
-            checked={form.add_rating_tag}
-            disabled={disabled}
-            onChange={(e) => onChange({ ...form, add_rating_tag: e.target.checked })}
-          />
-          rating
-        </label>
-        <label className="flex items-center gap-1.5 text-xs text-fg-tertiary">
-          <input
-            type="checkbox"
-            checked={form.add_model_tag}
-            disabled={disabled}
-            onChange={(e) => onChange({ ...form, add_model_tag: e.target.checked })}
-          />
-          model
-        </label>
         <button
           type="button"
           onClick={() => setAdvOpen(!advOpen)}
@@ -679,6 +711,31 @@ function CLTaggerPanel({
         >
           {advOpen ? '▾' : '▸'} 高级
         </button>
+      </div>
+
+      <div className="flex items-center gap-3 flex-wrap pt-1 border-t border-subtle">
+        <span className="text-xs text-fg-tertiary shrink-0" title="决定输出哪些类别的 tag。默认仅 通用+角色">
+          输出类别
+        </span>
+        {CLTAGGER_CATEGORIES.map(({ key, label }) => {
+          const checked = form.categories.includes(key)
+          const inDefault = defaultCats.includes(key)
+          return (
+            <label
+              key={key}
+              className={`flex items-center gap-1 text-xs cursor-pointer ${checked !== inDefault ? 'text-warn' : 'text-fg-tertiary'}`}
+              title={key}
+            >
+              <input
+                type="checkbox"
+                checked={checked}
+                disabled={disabled}
+                onChange={(e) => toggleCategory(key, e.target.checked)}
+              />
+              {label}
+            </label>
+          )
+        })}
       </div>
 
       {advOpen && (
@@ -887,6 +944,25 @@ function LLMTaggerPanel({
           </select>
         </label>
       </div>
+
+      <label
+        className="flex items-center gap-2 px-1 py-1 rounded cursor-pointer"
+        title="开启后会读取图片同名 .txt / .json 已有打标结果，作为先验提示和图片一起送给 LLM"
+      >
+        <input
+          type="checkbox"
+          checked={form.inject_existing_tags}
+          disabled={disabled}
+          onChange={(e) => onChange({ ...form, inject_existing_tags: e.target.checked })}
+        />
+        <span className="text-sm">结合本地打标数据</span>
+        <span className="text-xs text-fg-tertiary">
+          读取 .txt / .json 现有 caption 作为先验注入 prompt
+        </span>
+        {form.inject_existing_tags !== activePreset.inject_existing_tags && (
+          <span className="badge badge-warn text-[10px]">已改</span>
+        )}
+      </label>
 
       <div className="flex items-center gap-3 flex-wrap">
         <LLMNumberInput label="temperature" value={form.temperature} base={activePreset.temperature} step={0.05} min={0} max={2} disabled={disabled} onChange={(v) => onChange({ ...form, temperature: v })} />
