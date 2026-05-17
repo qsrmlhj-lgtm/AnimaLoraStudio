@@ -22,8 +22,13 @@ logger = logging.getLogger(__name__)
 
 
 class BucketManager:
-    """ARB 分桶管理"""
-    def __init__(self, base_reso=1024, min_reso=512, max_reso=2048, step=64):
+    """ARB 分桶管理。
+
+    max_reso 默认 1920：受 Cosmos Predict2 pos_embedder max_h=max_w=120 (latent token)
+    × VAE/patch 总下采样 16x 的硬限制。原 2048 会让 base=1536 时生成 (2048, 1152)
+    等桶 → latent 128×72 触发 `prepare_embedded_sequence` 越界 assert。
+    """
+    def __init__(self, base_reso=1024, min_reso=512, max_reso=1920, step=64):
         self.base_reso = base_reso
         self.buckets = self._generate(min_reso, max_reso, step, base_reso)
 
@@ -447,7 +452,8 @@ class CachedLatentDataset(Dataset):
 
     def _is_cache_valid(self, img_path, npz_path):
         """检查缓存是否有效（图像未修改，且格式含 latent 键）。
-        若为其他模型的不兼容缓存，则删除并返回 False。"""
+        若为其他模型的不兼容缓存或 latent 超出 pos_embedder 上限（≤120），
+        则删除并返回 False，让 _build_cache 重新 encode。"""
         if not npz_path.exists():
             return False
         if npz_path.stat().st_mtime < img_path.stat().st_mtime:
@@ -455,8 +461,20 @@ class CachedLatentDataset(Dataset):
         try:
             data = self.np.load(npz_path)
             if "latent" not in data.files:
+                data.close()
                 npz_path.unlink()
                 logger.debug(f"已删除不兼容缓存: {npz_path.name}")
+                return False
+            # 防止旧桶/旧 BucketManager 残留的越界 latent 复活。Cosmos Predict2
+            # pos_embedder max_h=max_w=120，超出会触发 prepare_embedded_sequence assert。
+            s = data["latent"].shape
+            h, w = (s[-2], s[-1])
+            data.close()
+            if h > 120 or w > 120:
+                npz_path.unlink()
+                logger.warning(
+                    f"已删除越界 latent 缓存（{h}x{w} > 120）: {npz_path.name}"
+                )
                 return False
         except Exception:
             try:

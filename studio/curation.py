@@ -14,10 +14,14 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+
+from PIL import Image
 
 from . import projects, versions
 from .datasets import IMAGE_EXTS
@@ -277,3 +281,189 @@ def has_train_images(
         ):
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# convert to PNG
+# ---------------------------------------------------------------------------
+
+_NON_PNG_IMAGE_EXTS = IMAGE_EXTS - {".png"}
+_MAX_CONVERT_WORKERS = os.cpu_count() or 4
+
+
+def _convert_one(src: Path) -> dict[str, str]:
+    """将单张非 PNG 图片原地转为 PNG，返回 {old, new, status}。
+
+    转换后删除原文件；同名 metadata (.txt/.json) 重命名为新 stem。
+    """
+    dst = src.with_suffix(".png")
+    old_name = src.name
+    new_name = dst.name
+    if dst.exists():
+        return {"old": old_name, "new": new_name, "status": "skipped_exists"}
+    try:
+        with Image.open(src) as img:
+            if img.mode in ("RGBA", "LA", "PA"):
+                bg = Image.new("RGB", img.size, (255, 255, 255))
+                bg.paste(img, mask=img.split()[-1])
+                bg.save(dst, "PNG")
+            else:
+                img.convert("RGB").save(dst, "PNG")
+        for ext in _META_EXTS:
+            meta_src = src.with_suffix(ext)
+            meta_dst = dst.with_suffix(ext)
+            if meta_src.exists() and not meta_dst.exists():
+                meta_src.rename(meta_dst)
+        src.unlink()
+        return {"old": old_name, "new": new_name, "status": "converted"}
+    except Exception as exc:
+        if dst.exists():
+            dst.unlink(missing_ok=True)
+        return {"old": old_name, "new": "", "status": f"failed: {exc}"}
+
+
+def convert_train_to_png(
+    conn,
+    project_id: int,
+    version_id: int,
+    folder: str,
+    files: list[str],
+) -> dict[str, Any]:
+    """将 train/{folder}/ 中指定的非 PNG 图片并行转为 PNG。"""
+    _validate_folder(folder)
+    _, _, train = _version_train_dir(conn, project_id, version_id)
+    fdir = train / folder
+    if not fdir.exists():
+        raise CurationError(f"文件夹不存在: {folder}")
+
+    targets: list[Path] = []
+    skipped_png: list[str] = []
+    missing: list[str] = []
+    for name in files:
+        _validate_filename(name)
+        p = fdir / name
+        if not p.exists():
+            missing.append(name)
+            continue
+        if p.suffix.lower() == ".png":
+            skipped_png.append(name)
+            continue
+        if p.suffix.lower() not in IMAGE_EXTS:
+            continue
+        targets.append(p)
+
+    results: list[dict[str, str]] = []
+    if targets:
+        with ThreadPoolExecutor(max_workers=min(_MAX_CONVERT_WORKERS, len(targets))) as pool:
+            futures = {pool.submit(_convert_one, t): t for t in targets}
+            for future in as_completed(futures):
+                results.append(future.result())
+
+    converted = [r for r in results if r["status"] == "converted"]
+    failed = [r for r in results if r["status"].startswith("failed")]
+    skipped_exists = [r for r in results if r["status"] == "skipped_exists"]
+
+    return {
+        "converted": [r["old"] for r in converted],
+        "failed": [{"name": r["old"], "reason": r["status"]} for r in failed],
+        "skipped_png": skipped_png,
+        "skipped_exists": [r["old"] for r in skipped_exists],
+        "missing": missing,
+    }
+
+
+# ---------------------------------------------------------------------------
+# resize oversized images (RoPE pos_embedder 安全护栏)
+# ---------------------------------------------------------------------------
+
+# Cosmos Predict2 pos_embedder max_h=max_w=120 (latent token)；VAE 8x + DiT patch 2x = 16x。
+# 长边 ≤ 120*16 = 1920 像素时不会触发 assert。BucketManager 桶生成步进 64，aspect 上限 2.0，
+# 长边落到 1920 时正好命中 (1920, 1024) 等桶，避免 (1984, 1152) 这种越界桶。
+SAFE_MAX_LONG_EDGE = 1920
+
+
+def _resize_one(src: Path, max_long_edge: int) -> dict[str, Any]:
+    """长边 > max_long_edge 时等比缩放原地覆盖；元数据 (.txt/.json) 不动。
+
+    返回 {name, status, before, after}。status:
+    - "resized"   已缩放
+    - "skipped"   原本就在阈值内
+    - "failed: …" 异常
+    """
+    try:
+        with Image.open(src) as img:
+            w, h = img.size
+            if max(w, h) <= max_long_edge:
+                return {"name": src.name, "status": "skipped", "before": [w, h], "after": [w, h]}
+            scale = max_long_edge / float(max(w, h))
+            new_w = max(1, int(round(w * scale)))
+            new_h = max(1, int(round(h * scale)))
+            img.load()  # 防止 lazy 加载被覆盖写卡住
+            resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            save_kwargs: dict[str, Any] = {}
+            fmt = (img.format or "").upper()
+            if fmt in ("JPEG", "JPG"):
+                save_kwargs["quality"] = 95
+                save_kwargs["subsampling"] = 0
+            resized.save(src, format=fmt or None, **save_kwargs)
+        return {"name": src.name, "status": "resized", "before": [w, h], "after": [new_w, new_h]}
+    except Exception as exc:
+        return {"name": src.name, "status": f"failed: {exc}", "before": None, "after": None}
+
+
+def resize_oversized_in_train(
+    conn,
+    project_id: int,
+    version_id: int,
+    folder: str,
+    files: list[str],
+    max_long_edge: int = SAFE_MAX_LONG_EDGE,
+) -> dict[str, Any]:
+    """把 train/{folder}/ 下指定图片中长边超出阈值的等比缩到 ≤max_long_edge。
+
+    用途：让数据集所有图片落入 RoPE pos_embedder 支持的 latent 范围（≤120 token），
+    避免训练时触发 `Input dimensions exceed the maximum dimensions` assert。
+    """
+    if max_long_edge < 256 or max_long_edge > 4096:
+        raise CurationError(f"max_long_edge 应在 256~4096 之间: {max_long_edge}")
+    _validate_folder(folder)
+    _, _, train = _version_train_dir(conn, project_id, version_id)
+    fdir = train / folder
+    if not fdir.exists():
+        raise CurationError(f"文件夹不存在: {folder}")
+
+    targets: list[Path] = []
+    missing: list[str] = []
+    for name in files:
+        _validate_filename(name)
+        p = fdir / name
+        if not p.exists():
+            missing.append(name)
+            continue
+        if p.suffix.lower() not in IMAGE_EXTS:
+            continue
+        targets.append(p)
+
+    results: list[dict[str, Any]] = []
+    if targets:
+        with ThreadPoolExecutor(max_workers=min(_MAX_CONVERT_WORKERS, len(targets))) as pool:
+            futures = {pool.submit(_resize_one, t, max_long_edge): t for t in targets}
+            for future in as_completed(futures):
+                results.append(future.result())
+
+    resized = [r for r in results if r["status"] == "resized"]
+    skipped = [r["name"] for r in results if r["status"] == "skipped"]
+    failed = [
+        {"name": r["name"], "reason": r["status"]}
+        for r in results if r["status"].startswith("failed")
+    ]
+
+    return {
+        "max_long_edge": max_long_edge,
+        "resized": [
+            {"name": r["name"], "before": r["before"], "after": r["after"]} for r in resized
+        ],
+        "skipped": skipped,
+        "failed": failed,
+        "missing": missing,
+    }

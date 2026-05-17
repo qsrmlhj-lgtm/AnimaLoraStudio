@@ -163,6 +163,8 @@ class LLMPresetConfig(BaseModel):
     # prompt 消息序列（含图片位置）
     messages: list[LLMMessage] = Field(default_factory=lambda: _default_messages_for(""))
     output_format: str = "json"  # json | text
+    # 注入本地已有 caption（wd14/cltagger 的 .txt 或 .json）作为先验提示
+    inject_existing_tags: bool = False
     # 生成参数
     temperature: float = 0.2
     max_tokens: int = 700
@@ -343,11 +345,39 @@ class CLTaggerConfig(BaseModel):
     local_dir: Optional[str] = None
     threshold_general: float = 0.35
     threshold_character: float = 0.6
+    # 输出 category 白名单。CLTagger tag_mapping 有 8 类：
+    # General / Character / Copyright / Artist / Meta / Model / Rating / Quality
+    # 默认仅保留 General + Character（最常用：通用 + 角色）。
+    categories: list[str] = Field(
+        default_factory=lambda: ["General", "Character"]
+    )
+    # legacy flags — 仅做向后兼容，由 _migrate_legacy_flags 迁移进 categories，
+    # 后处理逻辑统一以 categories 为单一来源。新代码不要再读这两个字段。
     add_rating_tag: bool = False
     add_model_tag: bool = False
     blacklist_tags: list[str] = Field(default_factory=list)
     # 与 WD14 一致：只有 CUDA EP 时才真正 batch，CPU 自动降到 1。
     batch_size: int = 8
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_flags(cls, data: Any) -> Any:
+        """旧 secrets 用 add_rating_tag / add_model_tag 单 flag；迁移合并进 categories。
+
+        旧字段 True 且 categories 不含对应 cat → 把对应 cat 追加；空 categories 用
+        默认值兜底，避免反序列化把字段省略当成"输出零分类"。
+        """
+        if not isinstance(data, dict):
+            return data
+        cats = list(data.get("categories") or [])
+        if not cats:
+            cats = ["General", "Character"]
+        if data.get("add_rating_tag") and "Rating" not in cats:
+            cats.append("Rating")
+        if data.get("add_model_tag") and "Model" not in cats:
+            cats.append("Model")
+        data["categories"] = cats
+        return data
 
 
 class QueueConfig(BaseModel):
