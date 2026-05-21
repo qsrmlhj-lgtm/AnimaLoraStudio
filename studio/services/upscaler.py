@@ -172,7 +172,10 @@ def _tensor_to_img(t: torch.Tensor) -> Image.Image:
     if t.dim() == 4:
         t = t.squeeze(0)
     # numpy 不直接支持 bf16；fp16 能直接转但乘 255 时精度不够 — 统一回 fp32
-    arr = t.clamp(0, 1).permute(1, 2, 0).float().cpu().numpy()  # HWC
+    # nan_to_num 防御 fp16 溢出产生的 NaN/Inf：clamp 不消 NaN，会穿透到 uint8
+    # cast 触发 "invalid value encountered in cast" 并输出全黑图。
+    arr = torch.nan_to_num(t, nan=0.0, posinf=1.0, neginf=0.0)
+    arr = arr.clamp(0, 1).permute(1, 2, 0).float().cpu().numpy()  # HWC
     arr = (arr * 255.0 + 0.5).astype(np.uint8)
     return Image.fromarray(arr)
 
@@ -311,6 +314,20 @@ def upscale_file(
             tile_size=tile_size,
             tile_pad=tile_pad,
         )
+        # ESRGAN/RRDB 在某些消费级 GPU 上 fp16 推理会溢出产生 NaN/Inf →
+        # 黑图。检测到非有限值且不是 fp32 时自动回退 fp32 重跑。
+        if dtype != torch.float32 and not torch.isfinite(out_tensor).all():
+            on_log(f"   ⚠ {dtype} 推理产生 NaN/Inf，回退 fp32 重试")
+            dtype = torch.float32
+            descriptor = load_model(model_path, device=dev, dtype=dtype)
+            tensor = _img_to_tensor(src_img).to(dev, dtype=dtype)
+            out_tensor = tiled_inference(
+                descriptor.model,
+                tensor,
+                scale=scale,
+                tile_size=tile_size,
+                tile_pad=tile_pad,
+            )
         out_img = _tensor_to_img(out_tensor)
         if target_area is not None:
             out_img = resize_to_area(out_img, int(target_area))
