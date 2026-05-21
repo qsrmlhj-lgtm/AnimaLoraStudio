@@ -176,7 +176,7 @@ Pydantic 模型在 `studio/secrets.py`；GET / PUT `/api/secrets` 操作；敏�
 ```
 ┌──────────────────────┐
 │  Anima                │
-│  lora studio · 0.8.2  │ ← 版本号从 /api/health 拉，single source of truth
+│  lora studio · 0.9.1  │ ← 版本号从 /api/health 拉，single source of truth
 ├──────────────────────┤
 │ ▶ 项目 (Projects)    │ /
 │   队列 (Queue)       │ /queue

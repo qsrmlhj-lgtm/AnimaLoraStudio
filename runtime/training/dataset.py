@@ -385,10 +385,27 @@ class BucketBatchSampler:
         self.epoch = int(epoch)
 
     def __len__(self):
-        n = len(self.dataset)
-        if self.drop_last:
-            return n // self.batch_size
-        return (n + self.batch_size - 1) // self.batch_size
+        # ARB 下实际 batch 数 = Σ_bucket f(n_b, bs)；用全局 n 会偏（每桶各自有零头）。
+        # 没有桶信息时退回到全局公式（线性 DataLoader 行为）。
+        if self._cached_dataset is None:
+            n = len(self.dataset)
+            if self.drop_last:
+                return n // self.batch_size
+            return (n + self.batch_size - 1) // self.batch_size
+        counts = {}
+        for idx in range(len(self.dataset)):
+            base_idx = idx % self._base_len
+            bucket = self._cached_dataset.bucket_for_index[base_idx]
+            if bucket is None:
+                bucket = (0, 0)
+            counts[bucket] = counts.get(bucket, 0) + 1
+        total = 0
+        for n in counts.values():
+            if self.drop_last:
+                total += n // self.batch_size
+            else:
+                total += (n + self.batch_size - 1) // self.batch_size
+        return total
 
     def __iter__(self):
         rng = random.Random(self.seed + self.epoch)
@@ -430,6 +447,7 @@ class CachedLatentDataset(Dataset):
     def __init__(self, base_dataset, vae, device, dtype, cache_dir=None):
         import numpy as np
         self.base_dataset = base_dataset
+        self.base_image_dataset = self._get_base_image_dataset(base_dataset)
         self.np = np
         # 获取原始数据集的 samples 列表
         self.samples = self._get_base_samples(base_dataset)
@@ -445,6 +463,27 @@ class CachedLatentDataset(Dataset):
             return self._get_base_samples(dataset.dataset)
         return []
 
+    def _get_base_image_dataset(self, dataset):
+        if hasattr(dataset, "samples") and hasattr(dataset, "bucket_mgr"):
+            return dataset
+        if hasattr(dataset, "dataset"):
+            return self._get_base_image_dataset(dataset.dataset)
+        return None
+
+    def _expected_bucket_size(self, img_path):
+        base = self.base_image_dataset
+        if base is None:
+            return None
+        try:
+            from PIL import Image
+            with Image.open(img_path) as img:
+                if getattr(base, "bucket_mgr", None):
+                    return base.bucket_mgr.get_bucket(img.width, img.height)
+                resolution = int(getattr(base, "resolution"))
+                return (resolution, resolution)
+        except Exception:
+            return None
+
     def _get_npz_path(self, img_path):
         """获取图像对应的 npz 缓存路径"""
         img_path = Path(img_path)
@@ -459,23 +498,30 @@ class CachedLatentDataset(Dataset):
         if npz_path.stat().st_mtime < img_path.stat().st_mtime:
             return False
         try:
-            data = self.np.load(npz_path)
-            if "latent" not in data.files:
-                data.close()
-                npz_path.unlink()
-                logger.debug(f"已删除不兼容缓存: {npz_path.name}")
-                return False
-            # 防止旧桶/旧 BucketManager 残留的越界 latent 复活。Cosmos Predict2
-            # pos_embedder max_h=max_w=120，超出会触发 prepare_embedded_sequence assert。
-            s = data["latent"].shape
-            h, w = (s[-2], s[-1])
-            data.close()
-            if h > 120 or w > 120:
-                npz_path.unlink()
-                logger.warning(
-                    f"已删除越界 latent 缓存（{h}x{w} > 120）: {npz_path.name}"
-                )
-                return False
+            with self.np.load(npz_path) as data:
+                if "latent" not in data.files:
+                    npz_path.unlink()
+                    logger.debug(f"已删除不兼容缓存: {npz_path.name}")
+                    return False
+                # 上游 v0.9.1：bucket 变更时缓存失效。
+                expected_bucket = self._expected_bucket_size(img_path)
+                if expected_bucket is not None:
+                    if "bucket_w" not in data.files or "bucket_h" not in data.files:
+                        return False
+                    if (int(data["bucket_w"]), int(data["bucket_h"])) != expected_bucket:
+                        return False
+                # 本地额外护栏：防止旧桶/旧 BucketManager 残留的越界 latent 复活。
+                # Cosmos Predict2 pos_embedder max_h=max_w=120，超出触发
+                # prepare_embedded_sequence assert。expected_bucket 检查覆盖
+                # 大多数 case，但缓存元数据缺失时这层硬上限仍是必须的。
+                s = data["latent"].shape
+                h, w = (s[-2], s[-1])
+                if h > 120 or w > 120:
+                    logger.warning(
+                        f"已删除越界 latent 缓存（{h}x{w} > 120）: {npz_path.name}"
+                    )
+                    npz_path.unlink()
+                    return False
         except Exception:
             try:
                 npz_path.unlink()
@@ -510,9 +556,9 @@ class CachedLatentDataset(Dataset):
             npz_path = self._get_npz_path(self.samples[i]["image"])
             if not npz_path.exists():
                 continue
-            data = self.np.load(npz_path)
-            latent = data["latent"]
-            s = latent.shape
+            with self.np.load(npz_path) as data:
+                latent = data["latent"]
+                s = latent.shape
             if len(s) == 5:
                 _, _, _, h, w = s
             else:

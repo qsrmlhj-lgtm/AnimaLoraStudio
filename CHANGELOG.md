@@ -6,13 +6,302 @@
 
 ---
 
+## [0.9.1] — 2026-05-20
+
+依赖修正 + 发布流水线 version 一致性校验
+
+### 改进
+
+- **bump_version.py 同步 package-lock.json，新增 verify-versions 跨文件一致性校验与 CI gate**
+  bump 子命令扩展为同步四处 version 字段（studio/__init__.py、studio/web/package.json、studio/web/package-lock.json 顶层与 `packages[""]`）。新增 verify-versions 子命令做一致性校验，bump 完成后自检；同时新增 .github/workflows/version-check.yml，在 pull_request 与 master / dev push 时执行 validate 与 verify-versions，阻断 version drift 流入历史。
+
+### 修复
+
+- **modelscope 提为必装依赖，ModelScope 下载源不再需要运行时手动安装**
+  services/model_downloader.py 的 ModelScope 路径原先在缺包时返回 False 并提示手动 `pip install modelscope`，requirements.txt 不列。本次将 modelscope 提为必装依赖，安装或自更新完成后 ModelScope 下载源开箱可用。
+
+---
+
+## [0.9.0] — 2026-05-20
+
+训练新增暂停 / 恢复 + huber loss / mixed_uniform timestep + 触发词自动写 caption + 全前端中英双语
+
+### 新增
+
+- **UI 暂停 / 恢复训练 + 队列挂起调度（ADR 0006）（#100, #101, #105）**
+  Queue / QueueDetail 页加 4 个新交互（详见
+  [ADR 0006](docs/adr/0006-queue-pause-resume.md) 全文 + Addendum 1
+  + design doc 三轮 review）：
+
+  - **任务暂停**：running task 点暂停 → 先弹 PauseConfirmModal 提醒
+    语义（按 Addendum 1：暂停 = cancel + 立即释放 GPU，恢复点从最近
+    一次 epoch 末 auto-backup 起），确认后子进程收 `CTRL_BREAK_EVENT`
+    / `SIGINT`，handle_interrupt 保 LoRA "interrupted" + 写 pause
+    snapshot freeze 当前 args → 子进程 exit 0 → task 标 paused。
+    UI 全程锁 PauseProgressModal 引导（保存中 / 30s 超时三选一 /
+    失败兜底）。
+  - **任务恢复**：paused 行点恢复 → status 回 pending → supervisor
+    下次 dispatch 用 `--resume-state <auto_epoch_state.pt>` 拉起，
+    bootstrap_phase 读 sibling config snapshot 覆盖 args（snapshot
+    是 ADR §5.7 frozen 真相，跟用户后续改 version / preset / yaml
+    完全解耦） → load_training_state 成功 emit
+    `resume_state_loaded` → supervisor 清 pause 文件对。
+  - **队列挂起 / 恢复调度**：banner sticky 顶部；挂起 confirmation
+    modal 检测 running task 多问一句 "让它跑完" / "同时暂停"，
+    主按钮文案随 radio 联动。
+  - **取消 paused task**：paused 行有 "彻底取消"，删 pause 文件 +
+    清 db 字段。
+
+  信号链路（#96 spike 端到端验证）：supervisor `CTRL_BREAK_EVENT` /
+  POSIX `SIGINT` → 子进程 SIGBREAK / SIGINT handler → handle_interrupt
+  保 state + emit `__EVENT__:pause_state` → supervisor `_finish_slot`
+  三元分流（paused / canceled / done / failed），pause_pending 但
+  state_path 空 → 兜底 canceled。db migration v6 加 4 个 NULLABLE 列
+  + `queue_settings` kv 表持久化 hold 开关（老库零 backfill）。
+
+- **打标页加触发词输入，启动后自动写进每张 caption 和采样图 prompt（#103）**
+  终结「忘记加触发词导致白训」footgun。Step 4 (Tagging) 顶部加一个
+  紧凑输入框，启动打标时把 trigger 落库到 `versions.trigger_word`
+  （migration v7），tag worker 把 trigger 作为第一个 tag 注入每张
+  caption：
+
+  - `.txt` / 简单 list `.json`：trigger 作为 `tags[0]`（case-
+    insensitive 去重）
+  - LLM `documented_full` `.json`：顶层 `meta.trigger` 注入（不污染
+    `ai_output` / `fixed` / `character` 等业务字段）
+  - caption_text 模式：`f"{trigger}, {text}"` prepend
+  - 训练 runtime `bootstrap.py` 自动把 trigger 注入 sample_prompt，
+    采样图天然带触发词（token 级 case-insensitive 匹配，"art" 不会
+    误判 "artist"）
+  - TagEdit 页 actions 区显示 trigger badge（read-only）缩短"忘记
+    什么是 trigger"的 cognitive distance
+
+  其他主流 trainer 对比：Civitai 在线 trainer 项目创建必填 → 强制；
+  AI-Toolkit `[trigger]` runtime 替换 → 不可移植；本 PR 走 "作者
+  写时规范化"路线，caption 文件即真相，切 trainer 也带得走。
+
+- **Studio 全前端中英双语 + 首次启动弹语言选择（#76, #89）**
+  - **#76**：Studio 前端 Regularization / Settings / Generate /
+    Testing / Presets / Project Overview / LLM Tagger 全页本地化；
+    schema 暴露字段改为 frontend-owned i18n key（后端 enum / 字段名
+    稳定，UI 渲染本地化 label / description / disable hint）；
+    Settings 模型 / upscaler 目录描述 + LLM Tagger builtin preset /
+    message editor copy 一并本地化；恢复 + 扩展 schema-driven
+    takeover（PPSF 禁 scheduler / InfoNoise 禁 timestep / Prodigy
+    / PPSF 锁 LR=1）。
+  - **#89**：首启语言选择从 `studio.bat/sh` CLI prompt（cmd.exe
+    默认 codepage 显示不了汉字）改成前端 modal。`localStorage
+    ['studio.lang']` 为 null 时自动弹出，"English / 中文" 两张卡
+    + 各自语言副标题，键盘焦点初始落到 `navigator.language` 命中
+    那张但视觉不引导。fresh install 不再有阻塞 prompt，CI / 无人
+    值守部署直通。
+
+- **训练新增 huber loss 选项，对极端样本更鲁棒（#75, #86, #87）**
+  - Schema 新增 `loss_type: Literal["mse", "huber"]` + `huber_c`
+    专属字段；默认 `mse`，旧 yaml / preset 行为 bit-for-bit 一致
+    （MseLoss.compute 跟 `F.mse_loss(reduction='none')` codify 严格
+    相等）。
+  - 按 ADR 0003 plugin registry 模式落子包：BUILDERS + build_loss
+    + validate_schema_consistency 三件套 + `LossProtocol`
+    (runtime_checkable Protocol)。
+  - **HuberLoss** 简化为单 constant δ（#86 删 PR #75 引入的
+    snr/sigma schedule —— 数学退化为 MSE，且无 paper / 主流 trainer
+    出处；触发 [feedback_verify_paper_before_fixing_algo]）。
+  - InfoNoise 的 `_raw_mse` 跟训练 loss 解耦，始终单独算一次
+    `F.mse_loss`（保证 huber 启用时 InfoNoise paper I-MMSE 假设
+    不被破坏），有 `test_infonoise_raw_mse_decoupled_from_loss_type`
+    守这条边界。
+
+- **新增 mixed_uniform timestep 采样模式 + 后置 schedule shift（#73, #85）**
+  - `timestep_sampling` Literal 加 `mixed_uniform_low` /
+    `mixed_uniform_logit` 两个 mode，在 uniform 全覆盖基础上按
+    `timestep_mix_low_prob` 比例混入 `logit_normal_low` /
+    `logit_normal` 的偏置端分布。
+  - 新字段 `timestep_schedule_shift: float = 1.0`：跟
+    `timestep_shift`（logit-normal 内部）不同，是对采样**完成后**
+    的 t 做一次额外 `t' = (t·s) / (1 + (s-1)·t)` 偏移。1536
+    训练用 1.12 比单独调 `timestep_shift` 更稳。
+  - 默认值 `timestep_mix_low_prob=0.0` / `timestep_schedule_shift
+    =1.0` 下输出 bit-for-bit 等价历史 sample_t（s==1.0 short-
+    circuit）。InfoNoise CDF 正式阶段不读 baseline shift（codify
+    `test_infonoise_cdf_path_ignores_baseline_timestep_schedule_shift`）。
+  - 字段命名 PR #85 把 `schedule_shift` → `timestep_schedule_shift`
+    对齐 `timestep_*` 一族（合并 24h 内 zero-cost 重命名）。
+
+- **loss_weighting=detail_inv_t 的权重上下限现在可在 UI 调（#72, #87）**
+  `loss_weighting=detail_inv_t` 原 clamp 范围 hardcode `[1, 5]`，
+  现在改 schema 两个参数 `detail_inv_t_min=1.0` / `detail_inv_t_max
+  =5.0`（show_when + advanced），默认值等价历史 hardcode（旧 yaml
+  行为零变化）。
+
+  - 雾蒙蒙 / 低饱和画风：max 降到 3，缓解"低 t 反复学"的偏置
+  - 高对比 / 硬朗画风：维持默认 [1, 5]
+  - 激进细节：max 升到 8（Prodigy d 估计注意单样本主导风险）
+
+  Schema validator 守 `min > max` 启动期 fail-fast；下限 ≥ 1.0
+  （描述补"<1.0 因 1/t>1 恒成立故无效"防配置死区）。
+
+- **Settings 加「统一模型路径」toggle，关后预设可携带绝对路径（#93）**
+  默认 ON（沿用旧行为，多数用户自动同步全局模型路径）；OFF 后：
+
+  | | toggle ON（默认） | toggle OFF |
+  |---|---|---|
+  | 预设页 / 项目页 4 字段 UI | disabled + 跳转 Settings hint | 可编辑 + picker + ↺ reset |
+  | fork preset → version | 用全局值覆盖 | 拷预设值不覆盖 |
+  | 保存为预设 | 4 字段清成 Settings 全局值 | 原样保留绝对路径 |
+  | yaml 落盘 | 一律绝对 POSIX 路径 | 同上 |
+
+  老相对路径 yaml read/write 兜底转绝对（基于 REPO_ROOT，反斜杠 →
+  POSIX `/`）。独立 PUT 端点不进全局 dirty 流程。
+
+### 变更
+
+- **暂停后从最近 epoch 末接续训练，不会丢半个 epoch 进度（ADR 0006 Addendum 1）（#105）**
+  合 PR-1~PR-4 后三方算法专家深度 audit dev 训练栈，翻盘初版 ADR 的
+  mid-epoch save 路径——grad_accum 周期未守 / dataloader 5% double-
+  train / `current_epoch` 二义性 / cosine restart `T_cur` 漂移都是
+  mid-epoch 无法 freeze 的根因。改为：
+
+  - **Pause = Cancel + 立即释放 GPU**：handle_interrupt 不再尝试
+    freeze mid-epoch 训练状态，直接 LoRA "interrupted" 落盘 + 子进程
+    exit。
+  - **Epoch 末 auto-backup**：每个 epoch 末覆盖式写一份
+    `state/task_<TID>/auto_epoch_state.pt`，下次 resume 就从这个最近
+    完整 epoch 边界起，零中段误差。
+  - **UI is_pausable 升级**：首 epoch 内 / 还没有 auto-backup 时暂停
+    按钮完全隐藏（避免点了 "暂停" 实际没有可恢复 state 的 footgun）。
+
+  详细 audit 流程 / 三方专家评审 / 拒绝方案 A/B/C 的理由见
+  [docs/adr/0006-queue-pause-resume.md](docs/adr/0006-queue-pause-resume.md)
+  Addendum 1。
+
+- **同一 version 下连跑多个训练任务不再互相覆盖进度文件（#97）**
+  `save_state_every` / `save_state_every_epochs` / `handle_interrupt`
+  全部改写到 `output_dir/state/task_<TID>/` 下，不再写 output_dir
+  顶层。同一 version 下连跑多个 task 时再也不会互相覆盖 state 文件
+  （latent bug 直接修）。
+
+  - supervisor 启动 training 时通过 env `LORA_TASK_ID` 注入 task id
+  - CLI 直接跑（无 env）fallback 到 `state/task_unknown/` 子目录
+  - `list_state_ckpts`（ResumeFieldPicker 后端）同时扫旧顶层 + 新
+    子目录，**老用户的现存 .pt 不丢**
+  - 顺手修了 `list_state_ckpts` 之前只扫 step 不扫 epoch 的小 bug
+
+- **导出训练集 / 队列改用浏览器原生下载，大文件不再卡内存（#104）**
+  outputs.zip 那套 `<a>` 直链 + 后端 `*_ready/_failed` SSE 标杆推
+  广到剩下的下载入口（train.zip / queue 导出），浏览器原生下载条
+  + app-side 小 spinner 收尾。SSH 隧道 / 大文件场景下不再吃 JS
+  heap、看得到进度、切 tab 不中断。
+
+  - 删 `downloadBlob` (fetch→blob，静默吃内存)
+  - 新事件：`version_train_zip_ready/_failed` / `queue_export_ready/
+    _failed`
+  - 预设 yaml 导入语义改对齐："上传即入池 + 自动选中"，同名冲突
+    弹三选一 dialog（覆盖 / 另存为 `{name}-2` / 取消），不再走"切
+    新建模式预填表单等用户改名"的二步式
+
+- **zip 安装包用户「启用自动更新」后不再被本地修改卡住（#84）**
+  v0.8.1 zip 用户实测：解压后跑过 `studio.bat run`，npm install 改
+  `studio/web/package-lock.json` 几行依赖元数据 → `git reset
+  --mixed` 路径 init 完就 dirty → 版本面板 pre-flight 卡更新。改
+  `--hard` 强制覆盖 working tree 对齐 anchor tag。zip 用户场景下
+  "启用自动更新"潜台词就是"对齐上游稳定版"，强制覆盖比保留随机改
+  动符合预期。Settings banner 文案显式改为「本地源码会同步到上游
+  v{X.Y.Z}，zip 目录里的本地修改会被覆盖」。
+
+### 修复
+
+- **Prodigy+ScheduleFree / InfoNoise 训练恢复后不再崩溃 / 丢进度（#105）**
+  - `prodigy_plus_schedulefree`（PPSF）依赖 `optimizer.train()` 切
+    训练模式，`load_training_state` 后没调，resume 立即抛 `Not in
+    train mode!`。修：`load_training_state` 末尾
+    `if hasattr(optimizer, 'train'): optimizer.train()`。
+  - InfoNoise 9 个内部 state（EMA / K / B / FIFO / cdf / hist / step
+    counters）之前不进 state_dict，resume 后冷启动重走 N_warm（默认
+    5000 步）。修：加 `state_dict` / `load_state_dict` 序列化 + K/B
+    mismatch 退冷启动 warning 不抛。
+  - 14 个新单测（baseline no-op / InfoNoise roundtrip / sample bit-
+    exact / K/B mismatch / FIFO maxlen / ckpt 损坏 warning）codify。
+
+- **路径选择器 3 处修：外部路径浏览 / 文件起点 / Windows 路径分隔符（#93）**
+  - 端点放开外部绝对路径浏览（之前 `list_dir` 默认拒外部，
+    PathPicker 设计本就是给选外部模型路径用的）
+  - 文件路径作起点时自动回退到父目录并高亮该文件（之前直接 404）
+  - 后端统一 `as_posix()` 输出，前端 `childPath` 拼接不再混用 `\`
+    / `/`
+  - 模型根目录输入框默认值预填实际绝对路径；之前 placeholder 文案
+    错写 `REPO_ROOT/anima/`（实际默认 `REPO_ROOT/models/`）
+
+- **LLM 打标兼容更多服务商响应格式 + 加并发节流（#88）**
+  - 解析 SSE 兼容响应（部分 OpenAI 兼容服务商即使 stream=false 也
+    回 `text/event-stream`，需要按行 + `[DONE]` 终止符解析）
+  - 每分钟并发请求节流（serial mode 也生效）
+  - 非流式响应路径单独 retry
+
+- **UI 一组小修：保存按钮配色 / 浏览器自动填充误触 / XY picker 选了立即生效（#94）**
+  - Settings 自定义放大器下载按钮漏 `common.download` zh/en i18n
+  - 设置页保存按钮 dirty 着色改 `btn-secondary` 灰 / `btn-primary`
+    橙 切换（之前一直橙色靠 disabled 区分弱）
+  - `SensitiveInput`（api_key / user_id 等）+ 配对 `username`
+    加 `autoComplete=new-password` + `data-lpignore` / `data-1p-
+    ignore` / `data-form-type=other`，阻止 Chrome / 1Password /
+    LastPass 自动填充触发 dirty
+  - 项目 step header 删 Download / Preprocess 的重复"设置"入口
+  - Generate XY 轴 LoRA picker：`InlineLoraPicker` 加 `live` 模式，
+    chip toggle / 权重变 / pid-vid 切换都即时 `onPick`，axis card
+    里常驻 picker 不再渲染"添加 N 个"commit footer
+
+---
+
+## [0.8.3] — 2026-05-19
+
+hotfix：ARB 桶不再丢小桶图 + 每 epoch step 数按桶算
+
+### 修复
+
+- **ARB 桶尾不足 batch_size 张图时整桶被丢的 bug 修复（短 batch 保留，对齐 kohya / ai-toolkit）**
+  `BucketBatchSampler` 默认 `drop_last=True`：每个 ARB 桶里
+  `len(bucket) % batch_size` 张图被丢。最严重的是
+  **桶 size < batch_size 时整桶被丢**，例如 batch_size=2
+  时所有单图奇形比例的桶都永远训不到。
+
+  排查 git history：`drop_last=True` 是 ARB 初版（commit
+  `6774079` "feat: add arb"，2026-02-08）默认写下的，没有
+  commit message / ADR 解释设计意图，应是沿用 PyTorch
+  `DataLoader` 的卫生默认 —— 但 ARB 场景下 trade-off 已经
+  翻转：普通 DataLoader 一个 epoch 丢 1 个零头，ARB 是
+  **每个桶各丢一个零头**，丢失量随桶数线性放大。
+
+  - `phases/dataset.py`：`drop_last=False`，对齐 kohya
+    `sd-scripts`（`math.ceil(len/bs)`）与 ostris `ai-toolkit`
+    （`min(end_idx, len(bucket))`）的「短 batch 不丢」语义
+  - diffusion DiT 用 LayerNorm/GroupNorm，对动态 batch
+    不敏感；`loop.py` 已按 `latents.shape[0]` 动态读 bs，
+    短 batch 不会引入数值问题
+
+- **每 epoch 步数现在按 ARB 桶精确算（之前偏小导致 LR scheduler 末尾不对齐）**
+  `__len__` 之前用全局 `n // batch_size`（或 `ceil(n/bs)`），
+  但 ARB 实际 batch 数 = `Σ_b f(n_b, bs)`，每桶各自有零头。
+  全局公式低估 batch 数 → `steps_per_epoch` 偏 → scheduler
+  `total_steps` 偏 → 末尾几步 LR 不对齐。
+
+  例：数据集 129 张 + batch_size=2，日志报「每 epoch 步数: 64」
+  （=129//2），但实际跑出来按桶 floor 求和会更小（每桶各掉一个
+  零头）。修后按桶遍历 `bucket_for_index` 分别 floor/ceil 求和。
+
+  加 `tests/test_bucket_batch_sampler.py` 覆盖：小桶不丢 / 历史
+  drop_last=True 行为 / `__len__` 按桶算 / `__len__` == 实际
+  yield 的 batch 数 / 无桶信息时退回全局公式。
+
+---
+
 ## [0.8.2] — 2026-05-17
 
 hotfix：预设系统脱钩 redesign + hf-mirror 暂不可用 + 新建预设预览补齐项目路径
 
 ### 变更
 
-- **预设跟 version 完全脱钩；version yaml 是 first-class「项目专属配置」**
+- **预设跟 version 改为完全脱钩，version yaml 直接作为「项目专属配置」**
   发现整个训练页预设系统的 mental model 是坏的：
   - picker 顶部「预设 X · 已自定义」标签永远显示「已自定义」，即使
     用户没改任何字段 —— 因为 fork 时 default_paths_for_new_version
@@ -115,7 +404,7 @@ hotfix：预设系统脱钩 redesign + hf-mirror 暂不可用 + 新建预设预�
 
 ### 变更
 
-- **版本面板单视图 + 通道（master/dev）作为偏好与 git 状态解耦（#81）**
+- **Settings 版本面板改单视图 + 升级通道做成用户偏好而非 git 状态（ADR 0005）（#81）**
   ADR 0005：之前「通道」绑死在 git 工作树状态上（branch 名 + `git reset
   --hard`），release 直后会出现「装的 v0.8.0」+「↑落后 2 commits」+
   「切到 dev 没反应」的矛盾解读。新模型把通道理解为**用户视图偏好**：
@@ -133,7 +422,7 @@ hotfix：预设系统脱钩 redesign + hf-mirror 暂不可用 + 新建预设预�
 
 ### 修复
 
-- **版本面板 E2E 回归 3 项（rollback 文案 / preflight / dev 卡 fetch race）（#82）**
+- **版本面板 3 项修：切到 dev 按钮状态错 / 同版本号伪箭头 / 双按钮重复（#82）**
   ADR 0005 重做后续：
 
   - rollback 文案在 stable / dev 两种 installed_kind 下分流，不再
@@ -152,7 +441,7 @@ hotfix：预设系统脱钩 redesign + hf-mirror 暂不可用 + 新建预设预�
 
 ### 新增
 
-- **预处理 stage（图片放大）+ 智能流水 + SSE 实时进度（#69）**
+- **新增「预处理」步骤（图片放大）+ 实时进度（#69）**
   流水线 ① 下载 → ② 筛选之间插入「② 预处理」step（旧 step 顺延），用户
   可在进入筛选前对下载图统一放大；现有项目可选跳过（sidebar 标「（可选）」）。
 
@@ -165,7 +454,7 @@ hotfix：预设系统脱钩 redesign + hf-mirror 暂不可用 + 新建预设预�
     3s 轮询 files 刷新 grid / 进度 / 盘占
   - **阶段缩略图预生成**：256/768 两档供 grid 用，切 filter 不卡
 
-- **InfoNoise 自适应 timestep 采样器 + plugin registry（#63, #66）**
+- **新增 InfoNoise 自适应 timestep 采样器（#63, #66）**
   基于 I-MMSE 等价（`dH/dσ = mmse/σ³`）：跟踪 per-bin 去噪 MSE FIFO + EMA，
   构造反 CDF 采样器把抽样集中在信息量大的噪声窗口；warmup 期回退到
   logit-normal baseline。
@@ -195,7 +484,7 @@ hotfix：预设系统脱钩 redesign + hf-mirror 暂不可用 + 新建预设预�
   - 字段描述按上下文调整：InfoNoise 启用时 `timestep_sampling` disabled +
     提示语；`timestep_shift` 显示 warm-up 上下文
 
-- **studio launcher 加 --torch / --fe-port flag + 默认子命令修复（#63）**
+- **studio CLI 加 --torch / --fe-port flag + 默认子命令修复（#63）**
   - **`--torch <tag>`** (`cu128` / `cu126` / `cu124` / `cu118` / `cpu`)：
     强制指定 CUDA torch wheel，CPU-only 租赁机 GPU torch 无法自动探测的
     场景。Ctrl+C 可跳过；同时支持 `--skip-pending` 跳过 restart 时的
@@ -207,7 +496,7 @@ hotfix：预设系统脱钩 redesign + hf-mirror 暂不可用 + 新建预设预�
 
 ### 变更
 
-- **预处理改单 grid + manifest 单源（ADR 0004）（#74）**
+- **预处理界面整合到单 grid，不再让用户区分「下载图 / 预处理图」（ADR 0004）（#74）**
   ADR 0004：「双 grid（待处理 / 已处理）」摊平成单 grid + 状态徽章；用户
   视角图只有一份，处理状态是图的属性。
 
@@ -236,7 +525,7 @@ hotfix：预设系统脱钩 redesign + hf-mirror 暂不可用 + 新建预设预�
   - **XY 矩阵**：lora_ckpt 轴改多选 chip 「添加 N 个」；`lora_scale` 改为
     全局轴（不再绑特定 LoRA）
 
-- **预设导入导出改 YAML 端到端文件 I/O（取代 JSON + 手写 parser）（#79）**
+- **预设导入导出改用 yaml 文件（取代 JSON）（#79）**
   后端落盘本就是 yaml，但前端导出却是 JSON + 一个 4 行手写 mini YAML
   parser（只支持单行 scalar，遇到 list / nested / quoted 字段静默丢字段，
   例如 `sample_prompts` / `timestep_samplers`）。本 PR 把传输模型换成
@@ -352,7 +641,7 @@ webui 一键自更新 + 训练栈解构（ADR 0002 / 0003）
     `git describe --tags --exact-match`，命中 → 回滚按钮显示 `v0.6.0`，
     未命中 fallback 到 sha[:8]
 
-- **训练栈解构 + plugin registry（ADR 0003）（#56, #57, #58）**
+- **训练栈内部重构（不影响用户行为，方便后续加自定义 adapter / scheduler）（ADR 0003）（#56, #57, #58）**
   实现 ADR 0003 全套：`runtime/anima_train.py` 从 2901 行 mega-script 拆到
   `runtime/training/` 子包（25 个文件，128 行 thin entry）+ 4 个 plugin
   registry + `AdapterProtocol` hook。**训练行为字节级等价**——LyCORIS 路径
@@ -381,7 +670,7 @@ webui 一键自更新 + 训练栈解构（ADR 0002 / 0003）
     函数 + BUILDERS 字典加一行 + schema Literal 加值，phases / loop / main
     0 改动
 
-- **训练稳定性：NaN skip + 噪声/loss/timestep 采样 + cross-attn KV trim（#55）**
+- **训练稳定性扩展：NaN skip + 噪声 / loss / timestep 采样新选项 + cross-attn KV trim（#55）**
   Cherry-pick 自 PR #49（saltysalrua），三方 review 后保留 5 个低风险高价值
   commit + 4 项我们的加固。**T-LoRA / Ortho-Hydra adapter / 手动 OrthoGrad
   不进主仓**，放 `experimental/pr49-adapters` 长期 parking lot。
@@ -405,7 +694,7 @@ webui 一键自更新 + 训练栈解构（ADR 0002 / 0003）
     被上游 drop 时显式 raise 而非 silent log（避免 8 小时训练后才发现
     用户勾选悄悄失效）
 
-- **ProdigyPlusScheduleFree 优化器：解 Prodigy mutation ep 问题（#46）**
+- **新增 Prodigy+ScheduleFree 优化器（解 Prodigy 训练中偶发「风格突变 epoch」问题）（#46）**
   Prodigy 内部 `d` 估计在 Flow Matching timestep 随机性 + 小数据集 + LoRA
   低参数量三重噪声下会"跳档"——`d` 是不下降的累积量，一旦异常 batch 推上
   档，后续整段训练就用更大有效步长。社区调研结论：Flux / Qwen-Image /
@@ -425,7 +714,7 @@ webui 一键自更新 + 训练栈解构（ADR 0002 / 0003）
 
 ### 变更
 
-- **Settings 减法：ⓘ tooltip 抽 InfoButton + help text 精简 + 历史显示 tag（#54）**
+- **Settings 减法：长 help text 折进 ⓘ tooltip + 历史版本卡显示 tag 而非 commit sha（#54）**
   - **`InfoButton` 组件**：click-toggle ⓘ 弹层，外部 click / Esc 关；
     button stopPropagation 防止放在 `<summary>` 里触发外层 toggle；新
     `styles/info-button.css` 中性 `.info-btn-*` 前缀
@@ -440,7 +729,7 @@ webui 一键自更新 + 训练栈解构（ADR 0002 / 0003）
 
 ### 改进
 
-- **训练页：内联新建预设 + tag chip 拖拽排序 + CNB→「下载训练集」（#47）**
+- **训练页：内联新建预设 + tag chip 拖拽排序 + 「导出训练集」按钮改名（#47）**
   4 个独立小 polish 合一 PR：
 
   - **内联新建预设**：训练页 picker grid 加「+ 新建预设」虚线卡片，
@@ -453,7 +742,7 @@ webui 一键自更新 + 训练栈解构（ADR 0002 / 0003）
   - **optimizer description 清理**：删「需 pip install prodigyopt」字样
     （两个包都已在 requirements.txt）
 
-- **应用风格 dialog 替换 22 处 window.confirm/prompt/alert + topbar/sidebar polish（#48）**
+- **弹窗统一改用应用样式（不再用浏览器原生 confirm/prompt）+ topbar/sidebar polish（#48）**
   - **`useDialog()` hook**：`src/components/Dialog.tsx` 命令式 confirm /
     prompt / alert，promise-based；tone (default / danger / warn) 控制
     确认按钮颜色；ESC + 点遮罩 = 取消；prompt 含同步 validate
@@ -473,7 +762,7 @@ LLM tagger + 训练监控可观测性 + Settings 页面体系重排
 
 ### 新增
 
-- **LLM tagger 第二打标器：OpenAI 兼容 API 长 caption（#18, #34, #35）**
+- **新增 LLM tagger（第二打标器，走 OpenAI 兼容 API 出长 caption）（#18, #34, #35）**
   - 支持 OpenRouter / vLLM / Ollama 等任何 OpenAI Chat Completions 兼容端点
   - 训练 WandB 集成：`tracker_project` / `tracker_run_name` / `wandb_api_key`
     串到 sd-scripts，run url + 关键 metric 同步贴回项目页
@@ -483,7 +772,7 @@ LLM tagger + 训练监控可观测性 + Settings 页面体系重排
     multi-turn / few-shot 对话格式
   - Settings UI 双栏 grid + 4 张 section 合并大 card + composer 高度撑满
 
-- **训练监控加 Topbar 系统资源 pill + SSE 增量协议（#37, #42）**
+- **Topbar 加 CPU / GPU / 内存 / VRAM 实时占用（#37, #42）**
   - Topbar 4 个等宽 pill（CPU / GPU / MEM / VRAM，min-w 96px）+ 两端对齐
   - 从 `nvidia-ml-py`（pynvml 已停维护）拉，backend `_StatsThread` 2.5s
     间隔通过 SSE `system_stats_updated` 推到前端
@@ -505,7 +794,7 @@ LLM tagger + 训练监控可观测性 + Settings 页面体系重排
 
 ### 变更
 
-- **Settings 页面结构重排：新增监控 tab + 面包屑跳转 + sticky 索引（#36）**
+- **Settings 重排：新增监控 tab + 面包屑跳转 + sticky 锚点（#36）**
   - 新增「监控」tab，WandB 从「训练」搬过去
   - HF / ModelScope 在「训练」合并成「模型下载源」section，按 `download_source`
     条件渲染
@@ -541,7 +830,7 @@ LLM tagger + 训练监控可观测性 + Settings 页面体系重排
     `AnimaLoraStudio/<version>` UA + `Accept: application/json`
   - 配套 `tests/test_downloader.py` 加 estimate 回归用例
 
-- **先验生成 500 `NameError: STUDIO_DATA`（#42 内）**
+- **AI 先验生成因变量名错误 500 报错修复（#42 内）**
   `reg_generate_prior` 写 cfg 用 `STUDIO_DATA / "reg_ai_configs"`，但
   `server.py` 顶部 `from .paths import (...)` 漏掉 `STUDIO_DATA`，路由
   一调即崩。一行 import 修复。
@@ -554,7 +843,7 @@ Danbooru 挂 Cloudflare 后 search API 403 hotfix
 
 ### 改进
 
-- **UA 带 `(by username)` + Danbooru 强制账号绑定（不再支持匿名）**
+- **Danbooru 现强制账号绑定，不再支持匿名（UA 同时带 by username 标识）**
   - UA 带 `(by username)`：符合 danbooru TOS 推荐格式；CF 收紧时按账户
     白名单比按匿名 UA 更安全
   - `secrets.has_credentials_for("danbooru")` 现在校 `username + api_key`；
@@ -582,7 +871,7 @@ UI 体验小改进 + onnxruntime-gpu 跨平台修复
 
 ### 改进
 
-- **打标 curation 工作流：全屏 preview + 键盘 accept/remove 快捷键（#27）**
+- **打标筛选页加全屏 preview + 键盘 accept/remove 快捷键（#27）**
   - 全屏 preview 取代弹窗预览
   - 键盘 accept / remove 快捷键，过单张图更快
   - tag 保存后明确的 CNB export 入口
@@ -611,7 +900,7 @@ UI 体验小改进 + onnxruntime-gpu 跨平台修复
 
 ### 新增
 
-- **测试出图（Generate）：侧栏入口 + 推理 daemon + XY 矩阵评测（#19, #22）**
+- **Generate 测试出图 + XY 矩阵评测（独立工具页，常驻推理 daemon）（#19, #22）**
   - 侧栏「测试」入口；`/api/generate` + `runtime/anima_generate.py`
   - 推理 daemon（常驻 GPU，避免每次重载）
   - XY 矩阵评测（参数扫）
@@ -619,12 +908,12 @@ UI 体验小改进 + onnxruntime-gpu 跨平台修复
   - SSE 改共享一条 EventSource，解 outputs / 刷页面挂死
   - favicon 随机轮换（noal_*.png）
 
-- **先验生成（无 LoRA）：Step 4 加先验 tab + /reg/generate-prior 端点**
+- **AI 先验生成（无 LoRA 用底模直接出图当 reg 集）—— Step 4 加先验 tab**
   - Step 4 加「先验生成」tab + explainer
   - `/api/projects/.../reg/generate-prior` + `runtime/anima_reg_ai.py`
   - `RegMeta.generation_method` 区分手工 / AI 生成
 
-- **断点续训：resume_state / resume_lora 加项目内文件 picker**
+- **断点续训：现有训练 state / LoRA ckpt 在 UI 直接选不用敲路径**
   - `resume_state` / `resume_lora` 字段旁边的「📁 浏览本项目」按钮：弹出
     dropdown 贴字段，按 version 分组列出项目所有可用文件，用户看的是
     「baseline / step 2476」这种语义 label，不暴露
@@ -653,37 +942,12 @@ UI 体验小改进 + onnxruntime-gpu 跨平台修复
   - flash_attn 一键装 wheel + 模型层 fast path + CLI 入口
   - `detect_env` 改用 torch ABI 拿 cuda_tag，不依赖 nvidia-smi
 
-- **新 CLTagger 打标器（外部贡献）+ tagger registry（#14）**
+- **新增 CLTagger 打标器（外部贡献）（#14）**
   - 新 CLTagger（外部贡献）
   - 抽 `OnnxTaggerBase`，CLTagger 自动获得 PP10 线程池
   - tagger registry + 统一 `<name>_overrides` 持久化键
 
-- **版本号集中到 studio/__init__.py + 新建 CHANGELOG.md（后续被 yaml 替代）**
-  - 版本号集中到 `studio/__init__.py:__version__`，FastAPI / Sidebar 都从这派生
-  - 新建 `CHANGELOG.md`（后续被 `release_notes.yaml` 替代为 source of truth）
-
-- **docs/ 重构：拆 user-guide / architecture / adr 三块**
-  - 拆 `docs/` 为三块：`user-guide/`（用户向）、`architecture/`（开发者向）、
-    `adr/`（决策记录）
-  - 新建 `docs/README.md` 总入口 + `docs/adr/README.md` 含 ADR 模板
-  - 三篇互斥方案文档合并为 ADR 0001 — LoKr 走 lycoris-lora 而不切 sd-scripts
-  - 删除已落地的 11 篇 PP 阶段 plan，保留 overview 改写为
-    `architecture/studio-pipeline.md`
-  - 删除过期的 `trainer-optimization-analysis.md`（2025-02 快照，建议项已落地）
-  - `docs/_local/` 进 `.gitignore` 收个人草稿
-
 ### 变更
-
-- **目录重组：scripts/ + tools/anima_* 搬到 runtime/**
-  - 新目录 `runtime/` 容纳所有 Anima 运行时核心（独立进程 / Studio
-    subprocess 调起 / 可单独 CLI 跑）：`anima_train` / `anima_generate` /
-    `anima_daemon` / `anima_reg_ai` / `train_monitor`
-  - `tools/` 收敛为纯用户 CLI + setup helper（download_models /
-    install_flash_attn / select_torch_index / validate_local_models /
-    check_requirements_changed / bench_*）
-  - 删除 ADR 0001 烟测遗物：`probe_lycoris_anima.py` + 5 个 `stage*.yaml`
-    + `.gitignore` 4 行 `scripts/stage*_output/` 排除
-  - 依赖方向单向：`models → utils → runtime → studio → tools`
 
 - **Settings 拆 4 个 tab（数据集 / 打标 / 训练 / 页面）+ ONNX 独立 section**
   - 拆 4 个 tab：数据集 / 打标 / 训练 / 页面
@@ -691,25 +955,15 @@ UI 体验小改进 + onnxruntime-gpu 跨平台修复
   - WD14 / CLTagger 改 anima 主模型样式（radio + 行内下载）
   - 字段对齐 + 2K 屏留白修复
 
-- **训练监控简化：no_progress 默认 True + 隐藏「监控与进度」组**
+- **训练页进度条默认隐藏（统一走 monitor 视图）**
   - 训练脚本搬到 `scripts/` + `tools/`，淘汰 `monitor_smooth.html`
   - `LoraEntry` 抽到 `schema.py`（收尾 PR-9）
   - 隐藏「监控与进度」组，`no_progress` 默认改 True
 
 ### 修复
 
-- **patch lycoris-lora 3.4.0 LokrModule.get_weight rank_dropout device bug**
-  临时 patch lycoris-lora 3.4.0 的 `LokrModule.get_weight` 在 rank_dropout
-  路径上的 device mismatch bug（CUDA vs CPU 张量混用）。upstream 修了之后
-  删 patch。
-
-- **stale 检测 mtime 改回并联，本地未 commit 编辑也触发重建**
-  `_web_dist_is_stale()` 之前把 mtime 降级成 fallback（HEAD 一致就跳过），
-  导致本地编辑后 `studio run` 看不到变化。改成并联（HEAD 比对 || mtime
-  比对，任一 stale 就重建）。
-
 - **折叠态干掉单独的「导出训练集」按钮，避免误触**
 
-- **修补 PR #14 (CLTagger) 遗留的 UX 与测试漏洞**
+- **CLTagger 一组 UX 修复（#14 follow-up）**
 
 ---
