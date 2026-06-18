@@ -26,7 +26,7 @@ studio/
 ```bash
 python -m studio              # 默认 = run
 python -m studio run          # 构建前端（如缺）+ 起后端
-python -m studio dev          # 前后端开发模式（5173 + 8765 --reload，并行）
+python -m studio dev          # 前后端开发模式（5173 + 8766 --reload，并行）
 python -m studio build        # 仅构建前端
 python -m studio test         # 跑 pytest + vitest
 ```
@@ -40,13 +40,13 @@ dev 模式会同时起 Vite 和 uvicorn 两个子进程，Ctrl+C 会一起干掉
 ### 直接调后端
 
 ```bash
-python -m studio.server --host 0.0.0.0 --port 8765
+python -m studio.server --host 0.0.0.0 --port 8766
 ```
 
 参数：
 
 ```bash
-python -m studio.server --host 0.0.0.0 --port 8765 --reload
+python -m studio.server --host 0.0.0.0 --port 8766 --reload
 ```
 
 ### 前端
@@ -105,5 +105,5 @@ npm run dev      # http://127.0.0.1:5173/studio/
 ```bash
 cd studio/web && npm run build
 # 启动后端：python -m studio.server
-# 浏览器：http://127.0.0.1:8765/studio/
+# 浏览器：http://127.0.0.1:8766/studio/
 ```

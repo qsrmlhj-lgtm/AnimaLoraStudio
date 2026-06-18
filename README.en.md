@@ -97,7 +97,7 @@ studio.bat
 ./studio.sh
 ```
 
-On first run, the launcher automatically: creates `venv/` → installs the matching CUDA torch (cu118 through cu130) based on detected GPU driver → installs `requirements.txt` → installs onnxruntime based on GPU detection → builds the frontend → starts the backend → opens the browser to <http://127.0.0.1:8765/studio/>.
+On first run, the launcher automatically: creates `venv/` → installs the matching CUDA torch (cu118 through cu130) based on detected GPU driver → installs `requirements.txt` → installs onnxruntime based on GPU detection → builds the frontend → starts the backend → opens the browser to <http://127.0.0.1:8766/studio/>.
 
 > If GPU detection falls back to CPU torch, you can reinstall the CUDA build from Settings → System → PyTorch with one click, or specify it explicitly via `studio.bat --torch cu128` (or `studio.sh --torch cu128`).
 
@@ -105,7 +105,7 @@ Alternative launch (equivalent, useful when calling `python` directly):
 
 ```bash
 python -m studio              # Build frontend if missing, then start backend
-python -m studio dev          # Watch mode: vite 5173 + uvicorn 8765 --reload
+python -m studio dev          # Watch mode: vite 5173 + uvicorn 8766 --reload
 python -m studio build        # Build frontend only
 python -m studio test         # pytest + vitest
 ```
@@ -140,7 +140,7 @@ WD14 tagger models are not in this list — they are auto-downloaded from HF to 
 
 ### 3. Follow the stepper
 
-Open <http://127.0.0.1:8765/studio/>:
+Open <http://127.0.0.1:8766/studio/>:
 
 1. Click "+ New project" on the projects page
 2. **① Download**: Booru scraping (fill in Gelbooru / Danbooru credentials in Settings first) or local zip upload

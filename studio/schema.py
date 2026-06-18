@@ -689,7 +689,7 @@ class TrainingConfig(BaseModel):
         json_schema_extra=_meta("monitor", hidden=True),
     )
     monitor_port: int = Field(
-        8765, ge=1, le=65535,
+        8766, ge=1, le=65535,
         description="(已废弃) 旧 monitor server 端口；当前忽略",
         json_schema_extra=_meta("monitor", hidden=True),
     )

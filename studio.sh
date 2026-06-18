@@ -20,14 +20,14 @@
 #   subcommand: run (default) | dev | build | test
 #
 #   run subcommand flags:
-#     --port <N>      backend uvicorn port (default 8765)
+#     --port <N>      backend uvicorn port (default 8766)
 #     --host <H>      bind host (default 127.0.0.1)
 #     --no-browser    do not auto-open browser
 #     --no-build      skip frontend rebuild check
 #     --torch <tag>   force torch CUDA tag (cu128/cu126/cu124/cu118/cpu)
 #
 #   dev subcommand flags:
-#     --port <N>      backend uvicorn port (default 8765)
+#     --port <N>      backend uvicorn port (default 8766)
 #     --fe-port <N>   frontend Vite dev server port (default 5173)
 #     --host <H>      bind host (default 127.0.0.1)
 #     --no-browser    do not auto-open browser

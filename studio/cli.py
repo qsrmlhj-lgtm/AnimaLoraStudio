@@ -2,7 +2,7 @@
 
 子命令：
     run    构建前端（如缺）+ 起后端（默认）
-    dev    前后端开发模式（Vite 5173 + uvicorn 8765 --reload，并行）
+    dev    前后端开发模式（Vite 5173 + uvicorn 8766 --reload，并行）
     build  仅构建前端
     test   依次跑 pytest + vitest
 
@@ -771,7 +771,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser("run", help="构建前端（如缺）+ 起后端")
     p_run.add_argument("--host", default="127.0.0.1")
-    p_run.add_argument("--port", type=int, default=8765)
+    p_run.add_argument("--port", type=int, default=8766)
     p_run.add_argument("--no-build", action="store_true",
                        help="即使 dist 不存在也不自动 build")
     p_run.add_argument("--no-browser", action="store_true",
@@ -785,8 +785,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_dev = sub.add_parser("dev", help="前后端开发模式")
     p_dev.add_argument("--host", default="127.0.0.1")
-    p_dev.add_argument("--port", type=int, default=8765,
-                       help="后端 uvicorn 端口（默认 8765）")
+    p_dev.add_argument("--port", type=int, default=8766,
+                       help="后端 uvicorn 端口（默认 8766）")
     p_dev.add_argument("--fe-port", type=int, default=5173,
                        help="前端 Vite 开发服务器端口（默认 5173）")
     p_dev.add_argument("--no-browser", action="store_true",

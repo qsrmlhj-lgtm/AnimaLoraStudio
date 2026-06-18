@@ -13,7 +13,7 @@ P1 范围（本文件目前实现）：
     - P4: /api/datasets
 
 启动：
-    python -m studio.server [--host 127.0.0.1] [--port 8765] [--reload]
+    python -m studio.server [--host 127.0.0.1] [--port 8766] [--reload]
 """
 from __future__ import annotations
 
@@ -3986,7 +3986,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="AnimaStudio daemon")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--port", type=int, default=8766)
     parser.add_argument(
         "--reload", action="store_true", help="dev mode (auto-reload on edit)"
     )

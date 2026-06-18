@@ -1,5 +1,5 @@
 // 与 FastAPI 守护进程交互的薄封装。
-// 开发时由 Vite proxy 转发到 127.0.0.1:8765；生产部署时与 API 同源。
+// 开发时由 Vite proxy 转发到 127.0.0.1:8766；生产部署时与 API 同源。
 
 export interface HealthResponse {
   status: string

@@ -56,7 +56,14 @@ def test_run_args_default_host_port() -> None:
     p = cli.build_parser()
     args = p.parse_args(["run"])
     assert args.host == "127.0.0.1"
-    assert args.port == 8765
+    assert args.port == 8766
+
+
+def test_dev_args_default_host_port() -> None:
+    p = cli.build_parser()
+    args = p.parse_args(["dev"])
+    assert args.host == "127.0.0.1"
+    assert args.port == 8766
 
 
 def test_run_custom_host_port() -> None:
